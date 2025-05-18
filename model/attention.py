@@ -2,6 +2,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def _calc_attention_bias(geo_proxy, attn_bias_factor):
@@ -259,22 +260,70 @@ class MaskedCartesianAttention(nn.Module):
 
         # Add spatial embedding at FIRST layer (ll = ql = latent_len)
         if seq_len == kv_spa_embed.shape[1]:
+            # Adapt spatial embeddings to match query and key dimensions
+            # [bs, sl, dk, dk] -> [bs, 1, sl, dk, dk] -> [bs, 4, sl, dk//2, dk//2]
+            q_spa_embed_reshaped = q_spa_embed.unsqueeze(1).repeat(1, 4, query_len, 1, 1)
+            kv_spa_embed_reshaped = kv_spa_embed.unsqueeze(1).repeat(1, 4, 1, 1, 1)
+            
+            # Ensure dimensions match for matrix multiplication
+            q_dim = q.size(-1)
+            spa_dim = q_spa_embed_reshaped.size(-1)
+            
+            if spa_dim != q_dim:
+                # Reshape spatial embeddings or pad as needed
+                if spa_dim > q_dim:
+                    # Use a subset of the spatial dimensions
+                    q_spa_embed_reshaped = q_spa_embed_reshaped[..., :q_dim, :q_dim]
+                    kv_spa_embed_reshaped = kv_spa_embed_reshaped[..., :q_dim, :q_dim]
+                else:
+                    # Pad spatial dimensions (this should not happen with current setup)
+                    pad_size = q_dim - spa_dim
+                    q_spa_embed_reshaped = F.pad(q_spa_embed_reshaped, (0, pad_size, 0, pad_size))
+                    kv_spa_embed_reshaped = F.pad(kv_spa_embed_reshaped, (0, pad_size, 0, pad_size))
+            
+            # Apply spatial embeddings to queries and keys
             # [bs, 4, ll, dm//4, dm//4] * [bs, 4, ll, dm//4, 1] -> [bs, 4, ll, dm//4]
-            q = q_spa_embed.unsqueeze(1).repeat(1, 4, query_len, 1, 1).matmul(q.unsqueeze(-1)).squeeze(-1)
+            q = q_spa_embed_reshaped.matmul(q.unsqueeze(-1)).squeeze(-1)
             # [bs, 4, sl, dm//4, dm//4] * [bs, 4, sl, dm//4, 1]
-            k = kv_spa_embed.unsqueeze(1).repeat(1, 4, 1, 1, 1).matmul(k.unsqueeze(-1)).squeeze(-1)
+            k = kv_spa_embed_reshaped.matmul(k.unsqueeze(-1)).squeeze(-1)
         # Add spatial embedding at PROCESSOR layers:
         elif seq_len == query_len:
-            # [bs, 4, ll, dm//4, dm//4] * [bs, 4, ll, dm//4, 1] -> [bs, 4, ll, dm//4]
-            q = q_spa_embed.unsqueeze(1).repeat(1, 4, query_len, 1, 1).matmul(q.unsqueeze(-1)).squeeze(-1)
-            # [bs, 4, ll, dm//4, dm//4] * [bs, 4, ll, dm//4, 1] -> [bs, 4, ll, dm//4]
-            k = q_spa_embed.unsqueeze(1).repeat(1, 4, query_len, 1, 1).matmul(k.unsqueeze(-1)).squeeze(-1)
+            # Adapt spatial embeddings to match query and key dimensions
+            q_spa_embed_reshaped = q_spa_embed.unsqueeze(1).repeat(1, 4, query_len, 1, 1)
+            
+            # Ensure dimensions match
+            q_dim = q.size(-1)
+            spa_dim = q_spa_embed_reshaped.size(-1)
+            
+            if spa_dim != q_dim:
+                if spa_dim > q_dim:
+                    q_spa_embed_reshaped = q_spa_embed_reshaped[..., :q_dim, :q_dim]
+                else:
+                    pad_size = q_dim - spa_dim
+                    q_spa_embed_reshaped = F.pad(q_spa_embed_reshaped, (0, pad_size, 0, pad_size))
+            
+            # Apply spatial embeddings
+            q = q_spa_embed_reshaped.matmul(q.unsqueeze(-1)).squeeze(-1)
+            k = q_spa_embed_reshaped.matmul(k.unsqueeze(-1)).squeeze(-1)
         # Add spatial embedding at DECODER layer (ql = 1)
         elif query_len == 1:
-            # [bs, 4, ql, dm//4, dm//4] * [bs, 4, ql, dm//4, 1] -> [bs, 4, ql, dm//4]
-            q = q_spa_embed.unsqueeze(1).repeat(1, 4, query_len, 1, 1).matmul(q.unsqueeze(-1)).squeeze(-1)
-            # [bs, 4, ll, dm//4, dm//4] * [bs, 4, ll, dm//4, 1] -> [bs, 4, ll, dm//4]
-            k = q_spa_embed.unsqueeze(1).repeat(1, 4, seq_len, 1, 1).matmul(k.unsqueeze(-1)).squeeze(-1)
+            # Adapt spatial embeddings to match query and key dimensions
+            q_spa_embed_reshaped = q_spa_embed.unsqueeze(1).repeat(1, 4, query_len, 1, 1)
+            
+            # Ensure dimensions match
+            q_dim = q.size(-1)
+            spa_dim = q_spa_embed_reshaped.size(-1)
+            
+            if spa_dim != q_dim:
+                if spa_dim > q_dim:
+                    q_spa_embed_reshaped = q_spa_embed_reshaped[..., :q_dim, :q_dim]
+                else:
+                    pad_size = q_dim - spa_dim
+                    q_spa_embed_reshaped = F.pad(q_spa_embed_reshaped, (0, pad_size, 0, pad_size))
+            
+            # Apply spatial embeddings
+            q = q_spa_embed_reshaped.matmul(q.unsqueeze(-1)).squeeze(-1)
+            k = q_spa_embed_reshaped.repeat(1, 1, seq_len, 1, 1).matmul(k.unsqueeze(-1)).squeeze(-1)
 
         # [bs, nh, ql, dm//4] * [bs, nh, dm//4, sl] -> [bs, nh, ql, sl]
         attn_score = q.matmul(k.transpose(-1, -2)) / math.sqrt(self.d_model // 4)  # dk

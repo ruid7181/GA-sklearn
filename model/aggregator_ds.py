@@ -7,6 +7,7 @@ from sklearn.neighbors import KDTree
 from sklearn.utils import shuffle
 from torch.utils.data import Dataset
 
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -38,6 +39,8 @@ class TabDataSampler(Dataset):
         self.query_tree = None
         self.context_pool, self.query_pool = None, None
         self.context_pool_data = None
+        self._context_pool_tensor = None
+        self._query_pool_tensor = None
 
     def __getitem__(self, item):
         """
@@ -51,6 +54,7 @@ class TabDataSampler(Dataset):
                                                    'data first, by calling '
                                                    '`set_context_pool()` and '
                                                    '`set_query_pool()`.')
+        
         indices, dists = self.query_tree.query_radius(
             X=self.query_pool[self.spa_cols][item: item + 1].to_numpy(),
             r=self.s_radius,
@@ -58,6 +62,7 @@ class TabDataSampler(Dataset):
         )
         indices = indices[0]
         dists = dists[0]
+        
         n_neighbor = indices.shape[0]
 
         if self.is_training:
@@ -65,14 +70,12 @@ class TabDataSampler(Dataset):
             indices = indices[indices != item]
             n_neighbor -= 1
 
-        query_point = torch.FloatTensor(
-            self.query_pool[self.feat_cols][item: item + 1].to_numpy()
-        )
+        query_point = self._query_pool_tensor[item:item+1]
 
         if n_neighbor <= self.seq_len:
             # h^{in} <= l_{max}, zero padding
             sample = torch.zeros(size=(self.seq_len, len(self.feat_cols)), dtype=torch.float) + torch.nan
-            sample[:n_neighbor] = self.context_pool_data[indices]
+            sample[:n_neighbor] = self._context_pool_tensor[indices]
             sample[-1] = query_point
 
             sample_dist = torch.zeros(size=(self.seq_len,), dtype=torch.float) + torch.nan
@@ -81,11 +84,12 @@ class TabDataSampler(Dataset):
             sample_dist[-1] = 0.
         else:
             # h^{in} > l_{max}, random clipping
-            indices = shuffle(indices, random_state=item)[:self.seq_len]
-            sample = self.context_pool_data[indices]
+            random_this_ = np.random.randint(100)
+            indices = shuffle(indices, random_state=item + random_this_)[:self.seq_len]
+            sample = self._context_pool_tensor[indices]
             sample[-1] = query_point
 
-            sample_dist = shuffle(dists, random_state=item)[:self.seq_len]
+            sample_dist = shuffle(dists, random_state=item + random_this_)[:self.seq_len]
             sample_dist = torch.FloatTensor(sample_dist)
             sample_dist = torch.where(sample_dist == 0, 1e-3, sample_dist)
             sample_dist[-1] = 0.
@@ -108,6 +112,11 @@ class TabDataSampler(Dataset):
         - Radius estimation for ContextQuery.
         """
         self.context_pool = context_pool
+        # Pre-convert data to tensor
+        self._context_pool_tensor = torch.from_numpy(
+            self.context_pool[self.feat_cols].to_numpy()
+        ).float()
+        
         self.query_tree = KDTree(self.context_pool[self.spa_cols])
 
         self.context_pool_data = torch.FloatTensor(
@@ -123,6 +132,10 @@ class TabDataSampler(Dataset):
 
     def set_query_pool(self, query_pool: pd.DataFrame = None):
         self.query_pool = query_pool
+        # Pre-convert query pool data to tensor for faster access
+        self._query_pool_tensor = torch.from_numpy(
+            self.query_pool[self.feat_cols].to_numpy()
+        ).float()
 
     def __count_avg_neighbors(self, all_points, radius, sample_size):
         tree = self.query_tree
@@ -157,6 +170,7 @@ class TabDataSampler(Dataset):
         :param tolerance:
             stopping criteria.
         """
+        seq_len = int(seq_len * 1.2)
         sample_size = int(sample_ratio * len(all_points))
         all_points = all_points.values
 
@@ -169,7 +183,7 @@ class TabDataSampler(Dataset):
 
             if abs(avg_seq_len - seq_len) <= tolerance:
                 logger.info(f'Radius estimation ends after {i} iterations. '
-                            f'Estimated radius: {mid:.5f}')
+                            f'Estimated radius: {mid:.5f} (seq_len extended by 1.2).')
                 return mid
 
             if avg_seq_len > seq_len:
@@ -178,5 +192,5 @@ class TabDataSampler(Dataset):
                 left = mid
 
         logger.info(f'Radius estimation ends after {max_iter} iterations. '
-                    f'Estimated radius: {((left + right) / 2.):.5f}')
+                    f'Estimated radius: {((left + right) / 2.):.5f} (seq_len extended by 1.2).')
         return (left + right) / 2.

@@ -70,56 +70,158 @@ class FCNRegressor(nn.Module):
         return in_mat
 
 
-class RotaryEmbeddingNaive:
+class RotaryEmbedding2D(nn.Module):
     """
-    Naive implementation of 2D rotary embedding.
+    Optimized 2D Rotary Positional Embeddings for geospatial coordinates.
+    Key optimizations:
+    1. Pre-compute and cache frequency bands
+    2. Use efficient batch operations
+    3. Support both training and inference with minimal overhead
+    4. Maintain compatibility with existing GeoAggregator architecture
     """
 
-    def __init__(self, d=4):
-        self.d = d
-        self.n_thetas = self.d // 4
-        self.thetas = torch.arange(0, self.n_thetas, 1)
-        self.thetas = 10000 ** ((2 - 2 * self.thetas) / self.d)
-        self.thetas = self.thetas.unsqueeze(0).unsqueeze(2)  # [1, n_thetas, 1]
-
-    def embed(self, spa_feat):
+    def __init__(self, d: int = 4, base: int = 10000, scale: float = 1.0, n_heads: int = 4):
         """
-        :param spa_feat: [bs, sl, 2]
-        :return: Rotation matrix R [bs, 1, d, d]
+        Args:
+            d: Model dimension (must be divisible by 4 for 2D coordinates)
+            base: Base for the frequency bands
+            scale: Optional scaling factor for positions
+            n_heads: Number of attention heads (default: 4)
+        """
+        super().__init__()
+        assert d % 4 == 0, f"Model dimension {d} must be divisible by 4 for 2D coordinates"
+        
+        self.d = d
+        self.base = base
+        self.scale = scale
+        self.n_heads = n_heads
+        
+        # Cache frequency bands - shape: [d//4] for each coordinate
+        inv_freq = 1.0 / (base ** (torch.arange(0, d//4, 1).float() / (d//4)))
+        self.register_buffer("inv_freq", inv_freq)
+        
+        # Cache for inference
+        self.cached_shape = None
+        self.cached_sin_cos = None
+
+    def _compute_sin_cos(self, coords: torch.Tensor) -> tuple:
+        """
+        Compute sin and cos values for given coordinates efficiently.
+        Args:
+            coords: [batch_size, seq_len, 2] coordinates tensor
+        Returns:
+            tuple of (sin_x, cos_x, sin_y, cos_y) each with shape [batch_size, seq_len, d//4]
+        """
+        x, y = coords[..., 0], coords[..., 1]
+        batch_size, seq_len = x.shape
+        
+        # Scale and reshape coordinates
+        x = x.view(batch_size, seq_len, 1) * self.scale
+        y = y.view(batch_size, seq_len, 1) * self.scale
+        
+        # Compute frequency products efficiently
+        freq_x = x @ self.inv_freq.view(1, -1)  # [batch_size, seq_len, d//4]
+        freq_y = y @ self.inv_freq.view(1, -1)
+        
+        # Compute sin and cos
+        sin_x, cos_x = torch.sin(freq_x), torch.cos(freq_x)
+        sin_y, cos_y = torch.sin(freq_y), torch.cos(freq_y)
+        
+        return sin_x, cos_x, sin_y, cos_y
+
+    def embed(self, spa_feat: torch.Tensor) -> torch.Tensor:
+        """
+        Create rotation matrices for spatial coordinates.
+        Args:
+            spa_feat: [batch_size, seq_len, 2] coordinates tensor
+        Returns:
+            Rotation matrix R [batch_size, seq_len, d, d]
         """
         batch_size, seq_len, _ = spa_feat.shape
-        spa_feat = spa_feat.permute(0, 2, 1)  # [bs, 2, sl]
-        thetas = self.thetas.repeat(batch_size, 1, 1)  # [bs, nt, 1]
+        
+        # Check if we can use cached computations for inference
+        if not self.training:
+            current_shape = (spa_feat.shape, spa_feat.device, spa_feat.dtype)
+            if self.cached_shape == current_shape and self.cached_sin_cos is not None:
+                sin_emb, cos_emb = self.cached_sin_cos
+                return self._construct_rotation_matrix(sin_emb, cos_emb, batch_size, seq_len)
+        
+        # Compute sin and cos values
+        sin_x, cos_x, sin_y, cos_y = self._compute_sin_cos(spa_feat)
+        
+        # Combine x and y components
+        sin_emb = torch.cat([sin_x, sin_y], dim=-1)  # [batch_size, seq_len, d//2]
+        cos_emb = torch.cat([cos_x, cos_y], dim=-1)
+        
+        # Cache for inference
+        if not self.training:
+            self.cached_shape = (spa_feat.shape, spa_feat.device, spa_feat.dtype)
+            self.cached_sin_cos = (sin_emb, cos_emb)
+        
+        # Construct rotation matrix
+        return self._construct_rotation_matrix(sin_emb, cos_emb, batch_size, seq_len)
 
-        thetas_x = torch.bmm(thetas, spa_feat[:, :1, :])  # [bs, nt, 1] * [bs, 1, sl] -> [bs, nt, sl]
-        thetas_y = torch.bmm(thetas, spa_feat[:, 1:, :])  # [bs, nt, sl]
-
-        R_x = torch.stack([
-            torch.cos(thetas_x),
-            - torch.sin(thetas_x),
-            torch.sin(thetas_x),
-            torch.cos(thetas_x)
-        ], dim=-1)  # [bs, nt, sl, 4]
-        R_x = R_x.view(batch_size, self.n_thetas, seq_len, 2, 2).permute(0, 2, 1, 3, 4)  # [bs, sl, nt, 2, 2]
-
-        R_y = torch.stack([
-            torch.cos(thetas_y),
-            - torch.sin(thetas_y),
-            torch.sin(thetas_y),
-            torch.cos(thetas_y)
-        ], dim=-1)  # [bs, nt, sl, 4]
-        R_y = R_y.view(batch_size, self.n_thetas, seq_len, 2, 2).permute(0, 2, 1, 3, 4)  # [bs, sl, nt, 2, 2]
-
-        RR = torch.stack((R_x, R_y), dim=3)  # [bs, sl, nt, 2D, 2, 2]
-        RR = RR.view(batch_size, seq_len, self.n_thetas * 2, 2, 2)  # [bs, sl, nt * 2D, 2, 2]
-
-        R = torch.stack([
-            torch.stack([
-                torch.block_diag(*RR[bs][sl]) for sl in range(seq_len)
-            ]) for bs in range(batch_size)
-        ])  # [bs, sl, dk, dk]
-
+    def _construct_rotation_matrix(self, sin_emb: torch.Tensor, cos_emb: torch.Tensor, batch_size: int, seq_len: int) -> torch.Tensor:
+        """
+        Construct rotation matrix from sin and cos embeddings.
+        Args:
+            sin_emb: [batch_size, seq_len, d//2]
+            cos_emb: [batch_size, seq_len, d//2]
+            batch_size: Batch size
+            seq_len: Sequence length
+        Returns:
+            Rotation matrix [batch_size, seq_len, d, d]
+        """
+        # The sin and cos embeddings have shape [batch_size, seq_len, d//2]
+        # For a proper 2x2 rotation matrix, we need to create a block diagonal matrix
+        
+        # First create block-wise matrices
+        d_half = sin_emb.shape[-1]  # This is d//2
+        
+        # For each position (batch element, sequence position), we'll create 
+        # a matrix of shape [d//2, d//2] where each 2x2 block is a rotation matrix
+        
+        # Initialize an empty rotation matrix
+        R = torch.zeros(batch_size, seq_len, self.d, self.d, device=sin_emb.device)
+        
+        # Fill in the rotation matrices
+        for i in range(d_half // 2):  # For each 2x2 block
+            # Get the sin and cos values for this block
+            sin_block = sin_emb[:, :, i].unsqueeze(-1).unsqueeze(-1)  # [b, s, 1, 1]
+            cos_block = cos_emb[:, :, i].unsqueeze(-1).unsqueeze(-1)  # [b, s, 1, 1]
+            
+            # Compute 2x2 rotation matrix for this block
+            block = torch.cat([
+                torch.cat([cos_block, -sin_block], dim=-1),
+                torch.cat([sin_block, cos_block], dim=-1)
+            ], dim=-2)  # [b, s, 2, 2]
+            
+            # Place this block along the diagonal
+            row_idx = i * 2
+            col_idx = i * 2
+            R[:, :, row_idx:row_idx+2, col_idx:col_idx+2] = block
+        
+        # Similarly for the y-coordinate blocks
+        for i in range(d_half // 2):
+            # Get the sin and cos values for this block
+            sin_block = sin_emb[:, :, i + d_half//2].unsqueeze(-1).unsqueeze(-1)  # [b, s, 1, 1]
+            cos_block = cos_emb[:, :, i + d_half//2].unsqueeze(-1).unsqueeze(-1)  # [b, s, 1, 1]
+            
+            # Compute 2x2 rotation matrix for this block
+            block = torch.cat([
+                torch.cat([cos_block, -sin_block], dim=-1),
+                torch.cat([sin_block, cos_block], dim=-1)
+            ], dim=-2)  # [b, s, 2, 2]
+            
+            # Place this block along the diagonal
+            row_idx = (i + d_half//2) * 2
+            col_idx = (i + d_half//2) * 2
+            R[:, :, row_idx:row_idx+2, col_idx:col_idx+2] = block
+            
         return R
+
+    def __repr__(self):
+        return f"RotaryEmbedding2D(d={self.d}, base={self.base}, scale={self.scale}, n_heads={self.n_heads})"
 
 
 class GeoAggregator(nn.Module):
@@ -205,7 +307,12 @@ class GeoAggregator(nn.Module):
             x_dims=self.x_dims,
             y_dims=self.y_dims
         )
-        self._rotary_embed = RotaryEmbeddingNaive(d=d_model // 4)
+        self._rotary_embed = RotaryEmbedding2D(
+            d=d_model // 8,
+            base=10000,
+            scale=1.0,
+            n_heads=4
+        )
         self._perceiver = CartesianPerceiver(
             d_model=d_model,
             n_attn_layer=n_attn_layer,
