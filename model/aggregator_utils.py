@@ -68,19 +68,25 @@ def _train_ga_regressor(model,
 
 def _test_ga_regressor(model,
                        test_loader,
-                       device):
+                       device,
+                       n_estimate=8,
+                       get_std=False):
     # Predict
     model.eval()
     criteria = nn.L1Loss()
     criteria.to(device)
-    predictions = []
+    predictions = torch.zeros(size=(n_estimate, len(test_loader)))
     with torch.no_grad():
-        for idx, (data, geo_proximity) in tqdm(enumerate(test_loader), desc='Inferencing'):
-            input_tensor = data.to(device)
+        for i_est in range(n_estimate):
+            for i_data, (data, geo_proximity) in tqdm(enumerate(test_loader), desc='Inferencing'):
+                input_tensor = data.to(device)
 
-            input_tensor[:, -1:, -1:] = torch.nan  # (pseudo) ground truth position
-            pred_y = model(input_tensor, geo_proximity)
+                input_tensor[:, -1:, -1:] = torch.nan  # (pseudo) ground truth position
+                pred_y = model(input_tensor, geo_proximity)
 
-            predictions.append(pred_y.item())
-
-    return np.array(predictions)
+                predictions[i_est, i_data] = pred_y.item()
+    
+    if get_std:
+        return predictions.mean(dim=0), predictions.std(dim=0)
+    else:
+        return predictions.mean(dim=0)

@@ -100,9 +100,9 @@ class RotaryEmbedding2D(nn.Module):
         inv_freq = 1.0 / (base ** (torch.arange(0, d//4, 1).float() / (d//4)))
         self.register_buffer("inv_freq", inv_freq)
         
-        # Cache for inference
-        self.cached_shape = None
-        self.cached_sin_cos = None
+        # # Cache for inference
+        # self.cached_shape = None
+        # self.cached_sin_cos = None
 
     def _compute_sin_cos(self, coords: torch.Tensor) -> tuple:
         """
@@ -139,12 +139,12 @@ class RotaryEmbedding2D(nn.Module):
         """
         batch_size, seq_len, _ = spa_feat.shape
         
-        # Check if we can use cached computations for inference
-        if not self.training:
-            current_shape = (spa_feat.shape, spa_feat.device, spa_feat.dtype)
-            if self.cached_shape == current_shape and self.cached_sin_cos is not None:
-                sin_emb, cos_emb = self.cached_sin_cos
-                return self._construct_rotation_matrix(sin_emb, cos_emb, batch_size, seq_len)
+        # # Check if we can use cached computations for inference
+        # if not self.training:
+        #     current_shape = (spa_feat.shape, spa_feat.device, spa_feat.dtype)
+        #     if self.cached_shape == current_shape and self.cached_sin_cos is not None:
+        #         sin_emb, cos_emb = self.cached_sin_cos
+        #         return self._construct_rotation_matrix(sin_emb, cos_emb, batch_size, seq_len)
         
         # Compute sin and cos values
         sin_x, cos_x, sin_y, cos_y = self._compute_sin_cos(spa_feat)
@@ -153,10 +153,10 @@ class RotaryEmbedding2D(nn.Module):
         sin_emb = torch.cat([sin_x, sin_y], dim=-1)  # [batch_size, seq_len, d//2]
         cos_emb = torch.cat([cos_x, cos_y], dim=-1)
         
-        # Cache for inference
-        if not self.training:
-            self.cached_shape = (spa_feat.shape, spa_feat.device, spa_feat.dtype)
-            self.cached_sin_cos = (sin_emb, cos_emb)
+        # # Cache for inference
+        # if not self.training:
+        #     self.cached_shape = (spa_feat.shape, spa_feat.device, spa_feat.dtype)
+        #     self.cached_sin_cos = (sin_emb, cos_emb)
         
         # Construct rotation matrix
         return self._construct_rotation_matrix(sin_emb, cos_emb, batch_size, seq_len)

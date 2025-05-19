@@ -170,7 +170,7 @@ class TabDataSampler(Dataset):
         :param tolerance:
             stopping criteria.
         """
-        seq_len = int(seq_len * 1.2)
+        seq_len = int(seq_len * 1.25)
         sample_size = int(sample_ratio * len(all_points))
         all_points = all_points.values
 

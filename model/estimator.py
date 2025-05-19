@@ -143,7 +143,7 @@ class GARegressor(BaseEstimator, RegressorMixin):
                             epochs=self.epochs,
                             device=self.device)
 
-    def predict(self, X, l):
+    def predict(self, X, l, n_estimate=8, get_std=False):
         """
         :param X:
             co-variates of the tabular dataset.
@@ -169,4 +169,6 @@ class GARegressor(BaseEstimator, RegressorMixin):
         # Predict
         return _test_ga_regressor(model=self.model,
                                   test_loader=data_loader,
-                                  device=self.device)
+                                  device=self.device,
+                                  n_estimate=n_estimate,
+                                  get_std=get_std)
