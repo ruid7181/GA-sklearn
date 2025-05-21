@@ -21,10 +21,10 @@ while preserving a strong expressive power.
 
 ## 🤖 Sklearn-style interface
 
-* We provide a simple sklearn-style interface of **GeoAggregator (GA)**, to apply the model on *your own
-  geospatial tabular datasets*.
+* We provide a simple sklearn-style interface of **GeoAggregator (GA)**, to apply the model on *your own*
+  geospatial tabular datasets.
   
-* Through this interface, hyperparameter tuning and model ensemble are made possible.
+* Through this interface, hyperparameter tuning and model ensembling are made possible.
 
 ## 🗿 Toy datasets
 
