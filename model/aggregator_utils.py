@@ -1,6 +1,5 @@
 import logging
 
-import numpy as np
 import torch
 import torch.nn as nn
 from tqdm import tqdm
@@ -55,7 +54,7 @@ def _train_ga_regressor(model,
             optimizer.step()
             lr_schedular.step()
 
-            if idx % 100 == 0:
+            if idx % 300 == 0:
                 step_loss = sum(loss_run_avg) / len(loss_run_avg)
                 losses.append(step_loss)
                 loss_run_avg = []
@@ -78,7 +77,7 @@ def _test_ga_regressor(model,
     predictions = torch.zeros(size=(n_estimate, len(test_loader)))
     with torch.no_grad():
         for i_est in range(n_estimate):
-            for i_data, (data, geo_proximity) in tqdm(enumerate(test_loader), desc='Inferencing'):
+            for i_data, (data, geo_proximity) in tqdm(enumerate(test_loader), desc=f'Inferencing {i_est}/{n_estimate}'):
                 input_tensor = data.to(device)
 
                 input_tensor[:, -1:, -1:] = torch.nan  # (pseudo) ground truth position

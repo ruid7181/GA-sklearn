@@ -183,7 +183,7 @@ class TabDataSampler(Dataset):
 
             if abs(avg_seq_len - seq_len) <= tolerance:
                 logger.info(f'Radius estimation ends after {i} iterations. '
-                            f'Estimated radius: {mid:.5f} (seq_len extended by 1.2).')
+                            f'Estimated radius: {mid:.5f} (seq_len extended by 1.25).')
                 return mid
 
             if avg_seq_len > seq_len:

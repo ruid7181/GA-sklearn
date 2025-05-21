@@ -50,7 +50,7 @@ class GARegressor(BaseEstimator, RegressorMixin):
         self.n_attn_layer = kwargs.get('n_attn_layer', 2)
         self.idu_points = kwargs.get('idu_points', 4)
         self.seq_len = kwargs.get('seq_len', 128)
-        self.attn_dropout = kwargs.get('attn_dropout', 0.2)
+        self.attn_dropout = kwargs.get('attn_dropout', 0.1)
         self.attn_bias_factor = kwargs.get('attn_bias_factor', None)
         self.reg_lin_dims = kwargs.get('reg_lin_dims', None)
         # ----------------------------------------------------------------
@@ -71,22 +71,23 @@ class GARegressor(BaseEstimator, RegressorMixin):
         if self.model_variant is not None:
             print(f'Using the model template: GA-{self.model_variant}.')
 
-        print(f"""
-        {f" GeoAggregator Model Summary ":_^50}
-        {"attention mechanism type":<30}{self.attn_variant:>18}
-        {"d_model":<30}{self.d_model:>18}
-        {"# attention layer":<30}{self.n_attn_layer:>18}
-        {"# inducing point":<30}{self.idu_points:>18}
-        {"# sequence length":<30}{self.seq_len:>18}
-        {"regressor neurons":<30}{str(self.reg_lin_dims):>18}
-        
-        {f" training details ":_^50}
-        {"Training on device":<30}{str(self.device):>18}
-        {"attention dropout rate":<30}{self.attn_dropout:>18}
-        {"maximum learning rate":<30}{self.lr:>18}
-        {"batch_size":<30}{self.batch_size:>18}
-        {"# epoch":<30}{self.epochs:>18}
-        """)
+        if not self.verbose:
+            print(f"""
+            {f" GeoAggregator Model Summary ":_^50}
+            {"attention mechanism type":<30}{self.attn_variant:>18}
+            {"d_model":<30}{self.d_model:>18}
+            {"# attention layer":<30}{self.n_attn_layer:>18}
+            {"# inducing point":<30}{self.idu_points:>18}
+            {"# sequence length":<30}{self.seq_len:>18}
+            {"regressor neurons":<30}{str(self.reg_lin_dims):>18}
+            
+            {f" training details ":_^50}
+            {"Training on device":<30}{str(self.device):>18}
+            {"attention dropout rate":<30}{self.attn_dropout:>18}
+            {"maximum learning rate":<30}{self.lr:>18}
+            {"batch_size":<30}{self.batch_size:>18}
+            {"# epoch":<30}{self.epochs:>18}
+            """)
 
     def fit(self, X, l, y):
         """
