@@ -32,6 +32,41 @@ while preserving a strong expressive power.
 * [New synthetic datasets (with SNR control)](data/tabular_datasets/snr-control)
 * [4 Real-world datasets](data/tabular_datasets)
 
+
 ## 🔥 Usage
 
-* The tutorial for a quick start can be found [here](demo.ipynb).
+### Installation
+
+To get started with the GA-sklearn, please follow these steps:
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/ruid7181/GA-sklearn.git
+   cd GA-sklearn
+   ```
+
+2. Install dependencies using the requirements file:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. Run the demo notebook to see GeoAggregator in action.
+  The tutorial for a quick start can be found [here](demo.ipynb).
+
+### Requirements
+
+Dependencies are listed in the `requirements.txt` file.
+
+## 📚 Citation
+
+```bibtex
+@inproceedings{deng2025geoaggregator,
+  title={GeoAggregator: An Efficient Transformer Model for Geo-Spatial Tabular Data},
+  author={Deng, Rui and Li, Ziqi and Wang, Mingshu},
+  booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},
+  volume={39},
+  number={11},
+  pages={11572--11580},
+  year={2025}
+}
+```
