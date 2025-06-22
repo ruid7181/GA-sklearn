@@ -276,7 +276,7 @@ class GeoAggregator(nn.Module):
         :param idu_points:
             Number of inducing points.
         :param attn_dropout:
-            Dropout probability.
+            Dropout probability for the attention mechanism.
         :param attn_bias_factor:
             If the attention bias factor is not given (None), the model dynamically
             learns the optimized value for the attention bias factor.

@@ -9,33 +9,6 @@ from model.aggregator_ds import TabDataSampler
 from model.aggregator_utils import _train_ga_regressor, _test_ga_regressor
 
 
-def _check_array_df(arr,
-                    ensure_2d=True,
-                    allow_nd=False,
-                    force_all_finite=True) -> pd.DataFrame:
-    orig_cols = None
-    orig_index = None
-    if isinstance(arr, pd.DataFrame):
-        orig_cols = arr.columns
-        orig_index = arr.index
-        arr = arr.values
-
-    X_checked = check_array(
-        arr,
-        ensure_2d=ensure_2d,
-        allow_nd=allow_nd,
-        force_all_finite=force_all_finite
-    )
-
-    if orig_cols is not None:
-        df = pd.DataFrame(X_checked, index=orig_index, columns=orig_cols)
-    else:
-        n_cols = X_checked.shape[1] if X_checked.ndim > 1 else 1
-        default_cols = [f"col_{i}" for i in range(n_cols)]
-        df = pd.DataFrame(X_checked, columns=default_cols)
-    return df
-
-
 class GARegressor(BaseEstimator, RegressorMixin):
     """
     A sklearn-style wrapper of GeoAggregator for spatial regression.
@@ -50,7 +23,7 @@ class GARegressor(BaseEstimator, RegressorMixin):
         self.n_attn_layer = kwargs.get('n_attn_layer', 2)
         self.idu_points = kwargs.get('idu_points', 4)
         self.seq_len = kwargs.get('seq_len', 128)
-        self.attn_dropout = kwargs.get('attn_dropout', 0.1)
+        self.attn_dropout = kwargs.get('attn_dropout', 0.05)
         self.attn_bias_factor = kwargs.get('attn_bias_factor', None)
         self.reg_lin_dims = kwargs.get('reg_lin_dims', None)
         # ----------------------------------------------------------------
@@ -62,16 +35,13 @@ class GARegressor(BaseEstimator, RegressorMixin):
         self.verbose = kwargs.get('verbose', True)
 
         self.model = None
-
-        self.tab_sampler = TabDataSampler(
-            seq_len=self.seq_len
-        )
+        self.tab_sampler = None
         # ----------------------------------------------------------------
         # Model Summary
         if self.model_variant is not None:
             print(f'Using the model template: GA-{self.model_variant}.')
 
-        if not self.verbose:
+        if self.verbose:
             print(f"""
             {f" GeoAggregator Model Summary ":_^50}
             {"attention mechanism type":<30}{self.attn_variant:>18}
@@ -89,7 +59,10 @@ class GARegressor(BaseEstimator, RegressorMixin):
             {"# epoch":<30}{self.epochs:>18}
             """)
 
-    def fit(self, X, l, y):
+    def fit(self,
+            X: pd.DataFrame,
+            l: pd.DataFrame,
+            y: pd.DataFrame):
         """
         Sklearn-style interface for training the GeoAggregator Regressor model
         on a geospatial tabular dataset.
@@ -102,17 +75,17 @@ class GARegressor(BaseEstimator, RegressorMixin):
             the target variable.
         """
         # Using Pytorch-style Dataset & DataLoader
-        X = _check_array_df(X)
-        l = _check_array_df(l)
-        y = _check_array_df(y, ensure_2d=False)
+        X = self.__check_array_df(arr=X)
+        l = self.__check_array_df(arr=l)
+        y = self.__check_array_df(arr=y, ensure_2d=False)
         tab_df = pd.merge(X, l, how="inner", left_index=True, right_index=True)
         tab_df = pd.merge(tab_df, y, how="inner", left_index=True, right_index=True)
 
-        self.tab_sampler.x_cols = X.columns
-        self.tab_sampler.y_cols = y.columns
-        self.tab_sampler.spa_cols = l.columns
-        self.tab_sampler.feat_cols = list(X.columns) + list(l.columns) + list(y.columns)
-        self.tab_sampler.train()
+        self.tab_sampler = TabDataSampler(x_cols=X.columns,
+                                          y_cols=y.columns,
+                                          spa_cols=l.columns,
+                                          seq_len=self.seq_len)
+        self.tab_sampler.train_mode()
         self.tab_sampler.set_context_pool(context_pool=tab_df)
         self.tab_sampler.set_query_pool(query_pool=tab_df)
 
@@ -142,9 +115,10 @@ class GARegressor(BaseEstimator, RegressorMixin):
                             train_loader=train_loader,
                             max_lr=self.lr,
                             epochs=self.epochs,
-                            device=self.device)
+                            device=self.device,
+                            verbose=self.verbose)
 
-    def predict(self, X, l, n_estimate=8, get_std=False):
+    def predict(self, X, l, n_estimate=8, get_std=False, verbose=True):
         """
         :param X:
             co-variates of the tabular dataset.
@@ -152,15 +126,15 @@ class GARegressor(BaseEstimator, RegressorMixin):
             2D spatial locations.
         """
         # Using Pytorch-style Dataset & DataLoader
-        X = _check_array_df(X)
-        l = _check_array_df(l)
+        X = self.__check_array_df(arr=X, columns=self.tab_sampler.x_cols)
+        l = self.__check_array_df(arr=l, columns=self.tab_sampler.spa_cols)
         tab_df = pd.merge(X, l, how="inner", left_index=True, right_index=True)
         tab_df[self.tab_sampler.y_cols] = 0.
 
         assert X.columns.equals(self.tab_sampler.x_cols)
         assert self.model is not None
 
-        self.tab_sampler.val()
+        self.tab_sampler.val_mode()
         self.tab_sampler.set_query_pool(query_pool=tab_df)
 
         data_loader = DataLoader(dataset=self.tab_sampler,
@@ -172,4 +146,74 @@ class GARegressor(BaseEstimator, RegressorMixin):
                                   test_loader=data_loader,
                                   device=self.device,
                                   n_estimate=n_estimate,
-                                  get_std=get_std)
+                                  get_std=get_std,
+                                  verbose=verbose)
+
+    def get_shap_predictor(self, X, l, n_background=30):
+        """
+        :param X:
+            co-variates of the tabular dataset TO BE EXPLAINED.
+        :param l:
+            coordinates of the tabular dataset TO BE EXPLAINED.
+        :param n_background:
+            number of background points in the explanation.
+        """
+        # Using Pytorch-style Dataset & DataLoader
+        X = self.__check_array_df(arr=X, columns=self.tab_sampler.x_cols)
+        l = self.__check_array_df(arr=l, columns=self.tab_sampler.spa_cols)
+        tab_df = pd.merge(X, l, how="inner", left_index=True, right_index=True)
+        tab_df[self.tab_sampler.y_cols] = 0.
+
+        self.tab_sampler.explain_mode(n_background=n_background)
+        self.tab_sampler.set_query_pool(query_pool=tab_df)
+
+        def shap_predictor(all_feat):
+            """
+            :param all_feat:
+                Both co-variates and coordinates of the tabular dataset TO BE EXPLAINED.
+            """
+            all_feat = self.__check_array_df(arr=all_feat,
+                                             columns=list(self.tab_sampler.x_cols) + list(self.tab_sampler.spa_cols))
+            all_feat[self.tab_sampler.y_cols] = 0.
+            self.tab_sampler.set_query_pool(query_pool=all_feat,
+                                            pre_compute_neighbors=False)
+
+            data_loader = DataLoader(dataset=self.tab_sampler,
+                                     batch_size=1,
+                                     shuffle=False)
+
+            return _test_ga_regressor(model=self.model,
+                                      test_loader=data_loader,
+                                      device=self.device,
+                                      n_estimate=1,
+                                      get_std=False,
+                                      verbose=False)
+
+        return shap_predictor
+
+    def __check_array_df(self,
+                         arr,
+                         columns=None,
+                         ensure_2d=True,
+                         allow_nd=False,
+                         force_all_finite=True) -> pd.DataFrame:
+        orig_cols = None
+        orig_index = None
+        if isinstance(arr, pd.DataFrame):
+            orig_cols = arr.columns
+            orig_index = arr.index
+            arr = arr.values
+
+        X_checked = check_array(
+            arr,
+            ensure_2d=ensure_2d,
+            allow_nd=allow_nd,
+            force_all_finite=force_all_finite
+        )
+
+        if orig_cols is not None:
+            df = pd.DataFrame(X_checked, index=orig_index, columns=orig_cols)
+        else:
+            default_cols = columns
+            df = pd.DataFrame(X_checked, columns=default_cols)
+        return df

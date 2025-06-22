@@ -1,22 +1,22 @@
 import logging
+from typing import Literal
 
 import numpy as np
 import pandas as pd
 import torch
-from sklearn.neighbors import KDTree
-from sklearn.utils import shuffle
 from torch.utils.data import Dataset
+from sklearn.neighbors import NearestNeighbors
 
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 formatter = logging.Formatter('[%(levelname)s] %(message)s')
 console_handler.setFormatter(formatter)
-
 logger.addHandler(console_handler)
+
+sampler_mode = Literal['train', 'val', 'explain']
 
 
 class TabDataSampler(Dataset):
@@ -26,21 +26,38 @@ class TabDataSampler(Dataset):
                  seq_len=None,
                  x_cols=None,
                  spa_cols=None,
-                 y_cols=None):
+                 y_cols=None,
+                 device=None):
+        """
+        :param sample_radius:
+
+        """
         self.s_radius = sample_radius
         self.radius_estimate_ratio = radius_estimate_ratio
         self.seq_len = seq_len
         self.x_cols = x_cols
         self.spa_cols = spa_cols
         self.y_cols = y_cols
-        self.feat_cols = None
+        self.feat_cols = list(x_cols) + list(spa_cols) + list(y_cols)
+        self.device = device
 
-        self.is_training = True
+        self.sampler_mode: sampler_mode = 'train'
         self.query_tree = None
         self.context_pool, self.query_pool = None, None
-        self.context_pool_data = None
-        self._context_pool_tensor = None
-        self._query_pool_tensor = None
+        self._context_tensor_pool = None
+        self._query_tensor_pool = None
+        self._neighbors_cache, self._dists_cache = None, None
+
+        self.x_cols_id = np.arange(
+            len(self.x_cols)
+        )
+        self.spa_cols_id = np.arange(
+            len(self.x_cols), len(self.x_cols) + len(self.spa_cols)
+        )
+        self.y_cols_id = np.array([-1])
+
+        self.explain_call_count = -2
+        self.n_background = None
 
     def __getitem__(self, item):
         """
@@ -54,56 +71,62 @@ class TabDataSampler(Dataset):
                                                    'data first, by calling '
                                                    '`set_context_pool()` and '
                                                    '`set_query_pool()`.')
-        
-        indices, dists = self.query_tree.query_radius(
-            X=self.query_pool[self.spa_cols][item: item + 1].to_numpy(),
-            r=self.s_radius,
-            return_distance=True
-        )
-        indices = indices[0]
-        dists = dists[0]
-        
+        assert (self._neighbors_cache is not None
+                and self._dists_cache is not None), ('Need to provide neighborhood relationship, '
+                                                     'by calling `pre_compute_neighbors()`.')
+
+        if self.sampler_mode == 'explain':
+            q_item_in_cache = self.explain_call_count // self.n_background
+        else:
+            q_item_in_cache = item
+
+        # Query, retrieve cached context points
+        indices = self._neighbors_cache[q_item_in_cache]
+        dists = self._dists_cache[q_item_in_cache]
+        if self.sampler_mode == 'train':
+            # Remove target point itself from retrieved points.
+            dists = dists[indices != q_item_in_cache]
+            indices = indices[indices != q_item_in_cache]
+
         n_neighbor = indices.shape[0]
-
-        if self.is_training:
-            dists = dists[indices != item]
-            indices = indices[indices != item]
-            n_neighbor -= 1
-
-        query_point = self._query_pool_tensor[item:item+1]
 
         if n_neighbor <= self.seq_len:
             # h^{in} <= l_{max}, zero padding
-            sample = torch.zeros(size=(self.seq_len, len(self.feat_cols)), dtype=torch.float) + torch.nan
-            sample[:n_neighbor] = self._context_pool_tensor[indices]
-            sample[-1] = query_point
+            sample = torch.zeros(
+                size=(self.seq_len, len(self.feat_cols)),
+                dtype=torch.float,
+                device=self.device
+            ) + torch.nan
+            sample[:n_neighbor] = self._context_tensor_pool[indices]
+            sample[-1] = self._query_tensor_pool[item: item + 1]
 
-            sample_dist = torch.zeros(size=(self.seq_len,), dtype=torch.float) + torch.nan
-            sample_dist[:n_neighbor] = torch.FloatTensor(dists)
-            sample_dist = torch.where(sample_dist == 0, 1e-3, sample_dist)
+            sample_dist = torch.zeros(
+                size=(self.seq_len,),
+                dtype=torch.float,
+                device=self.device
+            ) + torch.nan
+            sample_dist[:n_neighbor] = dists
+            sample_dist = torch.where(sample_dist == 0, 1e-4, sample_dist)
             sample_dist[-1] = 0.
         else:
             # h^{in} > l_{max}, random clipping
-            random_this_ = np.random.randint(100)
-            indices = shuffle(indices, random_state=item + random_this_)[:self.seq_len]
-            sample = self._context_pool_tensor[indices]
-            sample[-1] = query_point
+            perm = torch.randperm(
+                n_neighbor,
+                dtype=torch.long,
+                device=self.device
+            )[:self.seq_len]
+            indices = indices[perm]
+            sample = self._context_tensor_pool[indices]
+            sample[-1] = self._query_tensor_pool[item: item + 1]
 
-            sample_dist = shuffle(dists, random_state=item + random_this_)[:self.seq_len]
-            sample_dist = torch.FloatTensor(sample_dist)
-            sample_dist = torch.where(sample_dist == 0, 1e-3, sample_dist)
+            sample_dist = dists[perm]
+            sample_dist = torch.where(sample_dist == 0, 1e-4, sample_dist)
             sample_dist[-1] = 0.
 
-        return sample, sample_dist,
+        return sample, sample_dist
 
     def __len__(self):
-        return len(self.query_pool)
-
-    def train(self):
-        self.is_training = True
-
-    def val(self):
-        self.is_training = False
+        return self.query_pool.shape[0]
 
     def set_context_pool(self, context_pool: pd.DataFrame = None):
         """
@@ -111,46 +134,76 @@ class TabDataSampler(Dataset):
         - Prepare pytorch Tensor dataset from pandas DataFrame.
         - Radius estimation for ContextQuery.
         """
-        self.context_pool = context_pool
-        # Pre-convert data to tensor
-        self._context_pool_tensor = torch.from_numpy(
-            self.context_pool[self.feat_cols].to_numpy()
-        ).float()
-        
-        self.query_tree = KDTree(self.context_pool[self.spa_cols])
+        self.context_pool = context_pool[self.feat_cols].to_numpy()
+        self._context_tensor_pool = torch.from_numpy(
+            self.context_pool
+        ).float().to(self.device)
 
-        self.context_pool_data = torch.FloatTensor(
-            self.context_pool[self.feat_cols].to_numpy()
+        self.query_tree = NearestNeighbors(
+            algorithm='kd_tree',
+            n_jobs=-1
         )
+        self.query_tree.fit(self.context_pool[:, self.spa_cols_id])
 
         if self.s_radius is None:
             self.s_radius = self.__estimate_radius(
-                all_points=self.context_pool[self.spa_cols],
+                all_points=self.context_pool[:, self.spa_cols_id],
                 seq_len=self.seq_len,
                 sample_ratio=self.radius_estimate_ratio
             )
 
-    def set_query_pool(self, query_pool: pd.DataFrame = None):
-        self.query_pool = query_pool
-        # Pre-convert query pool data to tensor for faster access
-        self._query_pool_tensor = torch.from_numpy(
-            self.query_pool[self.feat_cols].to_numpy()
-        ).float()
+    def set_query_pool(self, query_pool: pd.DataFrame = None, pre_compute_neighbors=True):
+        """
+        - Prepare query data.
+        """
+        self.query_pool = query_pool[self.feat_cols].to_numpy()
+        self._query_tensor_pool = torch.from_numpy(
+            self.query_pool
+        ).float().to(self.device)
+
+        if self.sampler_mode == 'explain':
+            self.explain_call_count += 1
+
+        if pre_compute_neighbors:
+            self.__pre_compute_neighbors()
+
+    def __pre_compute_neighbors(self):
+        self._dists_cache, self._neighbors_cache = self.query_tree.radius_neighbors(
+            X=self.query_pool[:, self.spa_cols_id],
+            radius=self.s_radius,
+            return_distance=True
+        )
+        for i in range(len(self._dists_cache)):
+            self._dists_cache[i] = torch.from_numpy(self._dists_cache[i]).float().to(self.device)
+            self._neighbors_cache[i] = torch.from_numpy(self._neighbors_cache[i]).long().to(self.device)
+
+    def train_mode(self):
+        self.sampler_mode = 'train'
+
+    def val_mode(self):
+        self.sampler_mode = 'val'
+
+    def explain_mode(self, n_background=30):
+        self.sampler_mode = 'explain'
+        self.n_background = n_background
 
     def __count_avg_neighbors(self, all_points, radius, sample_size):
-        tree = self.query_tree
         N = all_points.shape[0]
         if sample_size < N:
             idx = np.random.choice(N, sample_size, replace=False)
             all_points = all_points[idx]
 
-        neighbors_idx = tree.query_radius(all_points, radius)
+        neighbors_idx = self.query_tree.radius_neighbors(
+            all_points,
+            radius,
+            return_distance=False
+        )
         counts = [len(nbrs) - 1 for nbrs in neighbors_idx]
 
         return np.mean(counts)
 
     def __estimate_radius(self,
-                          all_points: pd.DataFrame,
+                          all_points: np.array,
                           seq_len=81,
                           sample_ratio=0.3,
                           max_iter=30,
@@ -160,7 +213,7 @@ class TabDataSampler(Dataset):
         A binary search approach.
 
         :param all_points:
-            a df containing only 'spa' columns (spatial coordinates).
+            a np.ndarray containing only 'spa' features (spatial coordinates).
         :param seq_len:
             expected sequence length.
         :param sample_ratio:
@@ -172,7 +225,6 @@ class TabDataSampler(Dataset):
         """
         seq_len = int(seq_len * 1.25)
         sample_size = int(sample_ratio * len(all_points))
-        all_points = all_points.values
 
         left, right = 1e-6, 1
         for i in range(max_iter):
@@ -192,5 +244,5 @@ class TabDataSampler(Dataset):
                 left = mid
 
         logger.info(f'Radius estimation ends after {max_iter} iterations. '
-                    f'Estimated radius: {((left + right) / 2.):.5f} (seq_len extended by 1.2).')
+                    f'Estimated radius: {((left + right) / 2.):.5f} (seq_len extended by 1.25).')
         return (left + right) / 2.

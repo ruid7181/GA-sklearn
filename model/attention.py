@@ -8,17 +8,20 @@ import torch.nn.functional as F
 def _calc_attention_bias(geo_proxy, attn_bias_factor):
     """
     :param geo_proxy: [bs, sl]
+    :param attn_bias_factor: [4] (n-head = nh = 4)
+
+    :return: [bs, nh, sl]
     """
     batch_size, seq_len = geo_proxy.shape
     geo_proxy **= 2
     max_, _ = geo_proxy.max(dim=1, keepdim=True)
     min_, _ = geo_proxy.min(dim=1, keepdim=True)
-    geo_proxy = (geo_proxy - min_) / (max_ - min_ + 1e-6)
+    geo_proxy = (geo_proxy - min_) / (max_ - min_ + 1e-8)
     if isinstance(attn_bias_factor, torch.Tensor):
         geo_proxy = torch.mul(
-            geo_proxy,
-            attn_bias_factor.unsqueeze(0).repeat(batch_size, seq_len)
-        )
+            geo_proxy.unsqueeze(1).repeat(1, 4, 1),   # [bs, sl] -> [bs, nh (4), sl]
+            attn_bias_factor.unsqueeze(0).unsqueeze(2).repeat(batch_size, 1, seq_len)   # -> [bs, nh, sl]
+        ) # -> [bs, nh, sl]
     else:
         geo_proxy *= attn_bias_factor
 
@@ -32,6 +35,22 @@ class CartesianPerceiver(nn.Module):
                  n_hidden_token=4,
                  attn_dropout=0.1,
                  attn_bias_factor=None):
+        """
+        A Perceiver-like architecture (Encoder-Processor-Decoder)
+        Jaegle, A., et al. (2021). Perceiver io: A general architecture for structured inputs & outputs.
+
+        :param d_model:
+            Embedding dimension throughout the transformer model.
+        :param n_attn_layer:
+            Number of total attention layers.
+        :param n_hidden_token:
+            Number of hidden token, or inducing points.
+        :param attn_dropout:
+            Dropout probability for the attention mechanism.
+        :param attn_bias_factor:
+            Scaler controlling the amount of attention bias added to the attention
+            (see GeoAggregator paper).
+        """
         super(CartesianPerceiver, self).__init__()
         # ----------------------------------------------------------------
         self.d_model = d_model
@@ -42,7 +61,7 @@ class CartesianPerceiver(nn.Module):
         if attn_bias_factor:
             self.attn_bias_factor = attn_bias_factor
         else:
-            self.attn_bias_factor = nn.Parameter(torch.zeros(1))
+            self.attn_bias_factor = nn.Parameter(torch.zeros(4))
 
         self.attn_layers = nn.ModuleList([
             MaskedCartesianAttention(
@@ -114,7 +133,7 @@ class CartesianPerceiver(nn.Module):
         """
         batch_size = ctx_spa_embed.shape[0]
         attn_weights = torch.FloatTensor([])
-        gaussian_bias = _calc_attention_bias(geo_proxy, self.attn_bias_factor)  # [bs, sl]
+        gaussian_bias = _calc_attention_bias(geo_proxy, self.attn_bias_factor)  # -> [bs, nh, sl]
 
         embedding = torch.stack((a_embed, b_embed), dim=0)  # -> [2, bs, sl, dm//2]
         query = torch.stack((
@@ -195,7 +214,7 @@ class MaskedCartesianAttention(nn.Module):
                  n_a_head,
                  n_b_head,
                  attn_dropout=0.1,
-                 attn_bias_factor=1):
+                 attn_bias_factor=None):
         super(MaskedCartesianAttention, self).__init__()
 
         self.d_model = d_model
@@ -231,12 +250,15 @@ class MaskedCartesianAttention(nn.Module):
         :param q_spa_embed: [bs, 1, dk, dk]
         :param kv_spa_embed: [bs, sl, dk, dk]
         :param mask: [bs, sl] element to mask => 1, valid => 0.
-        :param attention_bias: [bs, nh, ql, sl]
+        :param attention_bias: [bs, nh, sl]
+
+        Note that: n-head = nh = 4
         """
         _, batch_size, seq_len, _ = k.shape
         _, _, query_len, _ = q.shape
 
         # Project, Cross concat & Rotate
+        # n-head = nh = 4
         # [bs, l, dm//2] -> [bs, l, dm//4]
         q_a = self.w_q_a(q[0])
         q_b = self.w_q_b(q[1])
@@ -328,12 +350,12 @@ class MaskedCartesianAttention(nn.Module):
         # [bs, nh, ql, dm//4] * [bs, nh, dm//4, sl] -> [bs, nh, ql, sl]
         attn_score = q.matmul(k.transpose(-1, -2)) / math.sqrt(self.d_model // 4)  # dk
 
-        if attention_bias.shape[1] == seq_len:
+        if attention_bias.shape[-1] == seq_len:
             if attention_bias is None:
                 raise NotImplementedError()
             else:
-                # [bs, sl] -> [bs, nh, ql, sl]
-                attention_bias = attention_bias.unsqueeze(1).unsqueeze(1).repeat(1, self.n_head, query_len, 1)
+                # [bs, nh, sl] -> [bs, nh, ql, sl]
+                attention_bias = attention_bias.unsqueeze(2).repeat(1, 1, query_len, 1)
         else:
             attention_bias = torch.zeros_like(attn_score, device=attn_score.device)
 
