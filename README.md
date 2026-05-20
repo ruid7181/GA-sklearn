@@ -23,7 +23,7 @@ while preserving a strong expressive power.
 
 * We provide a simple sklearn-style interface of **GeoAggregator (GA)**, to apply the model on *your own*
   geospatial tabular datasets.
-  
+
 * Through this interface, hyperparameter tuning and model ensembling are made possible.
 
 ## 🗿 Toy datasets
@@ -70,3 +70,7 @@ Dependencies are listed in the `requirements.txt` file.
   year={2025}
 }
 ```
+
+## License
+
+This software is released under the MIT License. See the [LICENSE](LICENSE) file for details.
