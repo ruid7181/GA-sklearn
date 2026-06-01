@@ -45,17 +45,23 @@ To get started with the GA-sklearn, please follow these steps:
    cd GA-sklearn
    ```
 
-2. Install dependencies using the requirements file:
+2. Install the project and dependencies:
    ```bash
-   pip install -r requirements.txt
+   pip install -e .
    ```
 
-3. Run the demo notebook to see GeoAggregator in action.
+3. For development and tests:
+   ```bash
+   pip install -e .[dev]
+   pytest
+   ```
+
+4. Run the demo notebook to see GeoAggregator in action.
   The tutorial for a quick start can be found [here](demo.ipynb).
 
 ### Requirements
 
-Dependencies are listed in the `requirements.txt` file.
+Dependencies are listed in `pyproject.toml`. A `requirements.txt` file is also provided for plain pip environments.
 
 ## 📚 Citation
 

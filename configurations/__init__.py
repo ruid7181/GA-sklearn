@@ -1,0 +1,1 @@
+"""GeoAggregator configuration package."""

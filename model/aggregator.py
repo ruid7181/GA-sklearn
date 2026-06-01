@@ -339,6 +339,9 @@ class GeoAggregator(nn.Module):
             )
         # ----------------------------------------------------------------
         # Regressor
+        if dc_lin_dims is None:
+            dc_lin_dims = [d_model // 2, 1]
+
         self._dc_lin_dims = dc_lin_dims.copy()
         self._dc_lin_dims.insert(
             0, d_model + len(self.x_dims + self.spa_dims)

@@ -58,7 +58,7 @@ class CartesianPerceiver(nn.Module):
         self.n_hidden_token = n_hidden_token
         self.attn_dropout = attn_dropout
         # ----------------------------------------------------------------
-        if attn_bias_factor:
+        if attn_bias_factor is not None:
             self.attn_bias_factor = attn_bias_factor
         else:
             self.attn_bias_factor = nn.Parameter(torch.zeros(4))

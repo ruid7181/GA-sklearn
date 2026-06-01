@@ -46,6 +46,7 @@ def _train_ga_regressor(model,
     for epo in range(1, epochs + 1):
         for idx, (data, geo_proximity) in enumerate(train_loader):
             input_tensor = data.to(device)
+            geo_proximity = geo_proximity.to(device)
             optimizer.zero_grad()
 
             gt = input_tensor[:, -1:, -1:].clone()  # [bs, 1, 1]
@@ -95,6 +96,7 @@ def _test_ga_regressor(model,
                                                       desc=f'Inferencing ({i_est + 1}/{n_estimate})',
                                                       disable=not verbose):
                 input_tensor = data.to(device)
+                geo_proximity = geo_proximity.to(device)
 
                 input_tensor[:, -1:, -1:] = torch.nan  # (pseudo) ground truth position
                 pred_y = model(input_tensor, geo_proximity)

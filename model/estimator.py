@@ -1,3 +1,6 @@
+import inspect
+
+import numpy as np
 import pandas as pd
 import torch
 from sklearn.base import BaseEstimator, RegressorMixin
@@ -14,28 +17,52 @@ class GARegressor(BaseEstimator, RegressorMixin):
     A sklearn-style wrapper of GeoAggregator for spatial regression.
     """
 
-    def __init__(self, **kwargs):
+    def __init__(
+            self,
+            x_cols=None,
+            spa_cols=None,
+            y_cols=None,
+            attn_variant='MCPA',
+            model_variant=None,
+            d_model=32,
+            n_attn_layer=2,
+            idu_points=4,
+            seq_len=128,
+            attn_dropout=0.05,
+            attn_bias_factor=None,
+            reg_lin_dims=None,
+            epochs=20,
+            lr=5e-3,
+            batch_size=8,
+            device='auto',
+            random_state=None,
+            verbose=True):
         # ----------------------------------------------------------------
         # GA hyperparameters. Refer to GeoAggregator class docstring for details.
-        self.attn_variant = kwargs.get('attn_variant')
-        self.model_variant = kwargs.get('model_variant', None)
-        self.d_model = kwargs.get('d_model', 32)
-        self.n_attn_layer = kwargs.get('n_attn_layer', 2)
-        self.idu_points = kwargs.get('idu_points', 4)
-        self.seq_len = kwargs.get('seq_len', 128)
-        self.attn_dropout = kwargs.get('attn_dropout', 0.05)
-        self.attn_bias_factor = kwargs.get('attn_bias_factor', None)
-        self.reg_lin_dims = kwargs.get('reg_lin_dims', None)
+        self.x_cols = x_cols
+        self.spa_cols = spa_cols
+        self.y_cols = y_cols
+        self.attn_variant = attn_variant
+        self.model_variant = model_variant
+        self.d_model = d_model
+        self.n_attn_layer = n_attn_layer
+        self.idu_points = idu_points
+        self.seq_len = seq_len
+        self.attn_dropout = attn_dropout
+        self.attn_bias_factor = attn_bias_factor
+        self.reg_lin_dims = reg_lin_dims
         # ----------------------------------------------------------------
         # Training settings.
-        self.epochs = kwargs.get('epochs', 20)
-        self.lr = kwargs.get('lr', 5e-3)
-        self.batch_size = kwargs.get('batch_size', 8)
-        self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-        self.verbose = kwargs.get('verbose', True)
+        self.epochs = epochs
+        self.lr = lr
+        self.batch_size = batch_size
+        self.device = device
+        self.random_state = random_state
+        self.verbose = verbose
 
         self.model = None
         self.tab_sampler = None
+        self.device_ = self.__resolve_device(device)
         # ----------------------------------------------------------------
         # Model Summary
         if self.model_variant is not None:
@@ -52,7 +79,7 @@ class GARegressor(BaseEstimator, RegressorMixin):
             {"regressor neurons":<30}{str(self.reg_lin_dims):>18}
             
             {f" training details ":_^50}
-            {"Training on device":<30}{str(self.device):>18}
+            {"Training on device":<30}{str(self.device_):>18}
             {"attention dropout rate":<30}{self.attn_dropout:>18}
             {"maximum learning rate":<30}{self.lr:>18}
             {"batch_size":<30}{self.batch_size:>18}
@@ -74,6 +101,10 @@ class GARegressor(BaseEstimator, RegressorMixin):
         :param y:
             the target variable.
         """
+        if self.random_state is not None:
+            np.random.seed(self.random_state)
+            torch.manual_seed(self.random_state)
+
         # Using Pytorch-style Dataset & DataLoader
         X = self.__check_array_df(arr=X)
         l = self.__check_array_df(arr=l)
@@ -108,15 +139,16 @@ class GARegressor(BaseEstimator, RegressorMixin):
                                    idu_points=self.idu_points,
                                    attn_dropout=self.attn_dropout,
                                    attn_bias_factor=self.attn_bias_factor,
-                                   dc_lin_dims=self.reg_lin_dims)
+                                   dc_lin_dims=self.reg_lin_dims).to(self.device_)
 
         # Fit the model
         _train_ga_regressor(model=self.model,
                             train_loader=train_loader,
                             max_lr=self.lr,
                             epochs=self.epochs,
-                            device=self.device,
+                            device=self.device_,
                             verbose=self.verbose)
+        return self
 
     def predict(self, X, l, n_estimate=8, get_std=False, verbose=True):
         """
@@ -125,6 +157,9 @@ class GARegressor(BaseEstimator, RegressorMixin):
         :param l:
             2D spatial locations.
         """
+        if self.tab_sampler is None or self.model is None:
+            raise ValueError("GARegressor must be fitted before calling predict().")
+
         # Using Pytorch-style Dataset & DataLoader
         X = self.__check_array_df(arr=X, columns=self.tab_sampler.x_cols)
         l = self.__check_array_df(arr=l, columns=self.tab_sampler.spa_cols)
@@ -144,7 +179,7 @@ class GARegressor(BaseEstimator, RegressorMixin):
         # Predict
         return _test_ga_regressor(model=self.model,
                                   test_loader=data_loader,
-                                  device=self.device,
+                                  device=self.device_,
                                   n_estimate=n_estimate,
                                   get_std=get_std,
                                   verbose=verbose)
@@ -184,7 +219,7 @@ class GARegressor(BaseEstimator, RegressorMixin):
 
             return _test_ga_regressor(model=self.model,
                                       test_loader=data_loader,
-                                      device=self.device,
+                                      device=self.device_,
                                       n_estimate=1,
                                       get_std=False,
                                       verbose=False)
@@ -204,12 +239,16 @@ class GARegressor(BaseEstimator, RegressorMixin):
             orig_index = arr.index
             arr = arr.values
 
-        X_checked = check_array(
-            arr,
-            ensure_2d=ensure_2d,
-            allow_nd=allow_nd,
-            force_all_finite=force_all_finite
-        )
+        check_kwargs = {
+            'ensure_2d': ensure_2d,
+            'allow_nd': allow_nd,
+        }
+        if 'ensure_all_finite' in inspect.signature(check_array).parameters:
+            check_kwargs['ensure_all_finite'] = force_all_finite
+        else:
+            check_kwargs['force_all_finite'] = force_all_finite
+
+        X_checked = check_array(arr, **check_kwargs)
 
         if orig_cols is not None:
             df = pd.DataFrame(X_checked, index=orig_index, columns=orig_cols)
@@ -217,3 +256,17 @@ class GARegressor(BaseEstimator, RegressorMixin):
             default_cols = columns
             df = pd.DataFrame(X_checked, columns=default_cols)
         return df
+
+    @staticmethod
+    def __resolve_device(device):
+        if device != 'auto':
+            return torch.device(device)
+
+        if torch.cuda.is_available():
+            return torch.device('cuda:0')
+
+        mps_backend = getattr(torch.backends, 'mps', None)
+        if mps_backend is not None and mps_backend.is_available():
+            return torch.device('mps')
+
+        return torch.device('cpu')
