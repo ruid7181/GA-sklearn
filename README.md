@@ -26,6 +26,9 @@ while preserving a strong expressive power.
 
 * Through this interface, hyperparameter tuning and model ensembling are made possible.
 
+* Spatial coordinates are min-max normalised by default inside `GARegressor`, so raw longitude/latitude,
+  UTM, or projected coordinates can be passed directly. Set `normalize_spatial=False` to disable this.
+
 ## 🗿 Toy datasets
 
 * [Original synthetic datasets (without SNR control)](data/tabular_datasets)
@@ -58,6 +61,22 @@ To get started with the GA-sklearn, please follow these steps:
 
 4. Run the demo notebook to see GeoAggregator in action.
   The tutorial for a quick start can be found [here](demo.ipynb).
+
+### Minimal example
+
+```python
+from model.estimator import GARegressor
+
+model = GARegressor(
+    seq_len=64,
+    epochs=20,
+    device="auto",
+    normalize_spatial=True,
+)
+
+model.fit(X=train_x, l=train_coordinates, y=train_y)
+pred = model.predict(X=test_x, l=test_coordinates)
+```
 
 ### Requirements
 

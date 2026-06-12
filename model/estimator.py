@@ -35,6 +35,7 @@ class GARegressor(BaseEstimator, RegressorMixin):
             lr=5e-3,
             batch_size=8,
             device='auto',
+            normalize_spatial=True,
             random_state=None,
             verbose=True):
         # ----------------------------------------------------------------
@@ -57,12 +58,15 @@ class GARegressor(BaseEstimator, RegressorMixin):
         self.lr = lr
         self.batch_size = batch_size
         self.device = device
+        self.normalize_spatial = normalize_spatial
         self.random_state = random_state
         self.verbose = verbose
 
         self.model = None
         self.tab_sampler = None
         self.device_ = self.__resolve_device(device)
+        self.spatial_min_ = None
+        self.spatial_scale_ = None
         # ----------------------------------------------------------------
         # Model Summary
         if self.model_variant is not None:
@@ -80,6 +84,7 @@ class GARegressor(BaseEstimator, RegressorMixin):
             
             {f" training details ":_^50}
             {"Training on device":<30}{str(self.device_):>18}
+            {"normalize spatial coords":<30}{str(self.normalize_spatial):>18}
             {"attention dropout rate":<30}{self.attn_dropout:>18}
             {"maximum learning rate":<30}{self.lr:>18}
             {"batch_size":<30}{self.batch_size:>18}
@@ -108,6 +113,7 @@ class GARegressor(BaseEstimator, RegressorMixin):
         # Using Pytorch-style Dataset & DataLoader
         X = self.__check_array_df(arr=X)
         l = self.__check_array_df(arr=l)
+        l = self.__fit_transform_spatial_locations(l)
         y = self.__check_array_df(arr=y, ensure_2d=False)
         tab_df = pd.merge(X, l, how="inner", left_index=True, right_index=True)
         tab_df = pd.merge(tab_df, y, how="inner", left_index=True, right_index=True)
@@ -163,6 +169,7 @@ class GARegressor(BaseEstimator, RegressorMixin):
         # Using Pytorch-style Dataset & DataLoader
         X = self.__check_array_df(arr=X, columns=self.tab_sampler.x_cols)
         l = self.__check_array_df(arr=l, columns=self.tab_sampler.spa_cols)
+        l = self.__transform_spatial_locations(l)
         tab_df = pd.merge(X, l, how="inner", left_index=True, right_index=True)
         tab_df[self.tab_sampler.y_cols] = 0.
 
@@ -193,9 +200,13 @@ class GARegressor(BaseEstimator, RegressorMixin):
         :param n_background:
             number of background points in the explanation.
         """
+        if self.tab_sampler is None or self.model is None:
+            raise ValueError("GARegressor must be fitted before calling get_shap_predictor().")
+
         # Using Pytorch-style Dataset & DataLoader
         X = self.__check_array_df(arr=X, columns=self.tab_sampler.x_cols)
         l = self.__check_array_df(arr=l, columns=self.tab_sampler.spa_cols)
+        l = self.__transform_spatial_locations(l)
         tab_df = pd.merge(X, l, how="inner", left_index=True, right_index=True)
         tab_df[self.tab_sampler.y_cols] = 0.
 
@@ -209,6 +220,8 @@ class GARegressor(BaseEstimator, RegressorMixin):
             """
             all_feat = self.__check_array_df(arr=all_feat,
                                              columns=list(self.tab_sampler.x_cols) + list(self.tab_sampler.spa_cols))
+            spatial_part = self.__transform_spatial_locations(all_feat[self.tab_sampler.spa_cols])
+            all_feat.loc[:, self.tab_sampler.spa_cols] = spatial_part.to_numpy()
             all_feat[self.tab_sampler.y_cols] = 0.
             self.tab_sampler.set_query_pool(query_pool=all_feat,
                                             pre_compute_neighbors=False)
@@ -256,6 +269,26 @@ class GARegressor(BaseEstimator, RegressorMixin):
             default_cols = columns
             df = pd.DataFrame(X_checked, columns=default_cols)
         return df
+
+    def __fit_transform_spatial_locations(self, loc: pd.DataFrame) -> pd.DataFrame:
+        if not self.normalize_spatial:
+            self.spatial_min_ = None
+            self.spatial_scale_ = None
+            return loc
+
+        self.spatial_min_ = loc.min(axis=0)
+        spatial_max = loc.max(axis=0)
+        self.spatial_scale_ = (spatial_max - self.spatial_min_).replace(0, 1)
+        return self.__transform_spatial_locations(loc)
+
+    def __transform_spatial_locations(self, loc: pd.DataFrame) -> pd.DataFrame:
+        if not self.normalize_spatial:
+            return loc
+
+        if self.spatial_min_ is None or self.spatial_scale_ is None:
+            raise ValueError("Spatial normalizer is not fitted. Call fit() first.")
+
+        return (loc - self.spatial_min_) / self.spatial_scale_
 
     @staticmethod
     def __resolve_device(device):
