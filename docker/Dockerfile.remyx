@@ -1,0 +1,97 @@
+# syntax=docker/dockerfile:1.4
+FROM pytorch/pytorch:2.3.0-cuda12.1-cudnn8-devel
+
+ENV CUDA_HOME=/usr/local/cuda-12.1
+WORKDIR /app
+
+# Install git to enable cloning the repository
+RUN apt-get update && apt-get install -y git
+
+# Clone the repository into the working directory
+RUN git clone https://github.com/ruid7181/GA-sklearn.git .
+
+# Install Python dependencies from the repository's requirements file
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Create a self-contained Python script to run the core demo
+COPY --chmod=755 <<'PYTHON' /app/run_demo.py
+#!/usr/bin/env python
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score, mean_absolute_error
+import sys
+import torch
+
+# Add current directory to path to find local modules
+sys.path.append('.');
+
+from model.estimator import GARegressor
+
+print("--- Starting GA-sklearn Demo ---")
+print(f"Using device: {'cuda:0' if torch.cuda.is_available() else 'cpu'}")
+
+# --- Step 1: Load and prepare the dataset ---
+print("\n[Step 1/3] Loading and preparing dataset...")
+tab_x = ['bathrooms', 'sqft_living', 'sqft_lot',
+         'grade', 'condition', 'waterfront',
+         'view', 'age']
+tab_l = ['UTM_X', 'UTM_Y']
+tab_y = ['log_price']
+
+# Load the tabular dataset from the cloned repo
+df = pd.read_csv(r'./data/tabular_datasets/cupum-demo.csv')
+
+# Normalize spatial coordinates
+df[tab_l] = df[tab_l].apply(
+    lambda x: (x - x.min()) / (x.max() - x.min() + 1e-8)
+)
+
+# Train-Test split
+X, y = df[tab_x + tab_l], df[tab_y]
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=1)
+print("Dataset loaded and preprocessed.")
+
+
+# --- Step 2: Train the model ---
+print("\n[Step 2/3] Training the GeoAggregator model...")
+# Specify the hyperparameters for the GA model.
+params = {
+    'x_cols': tab_x,
+    'spa_cols': tab_l,
+    'y_cols': tab_y,
+    'attn_variant': 'MCPA',
+    'd_model': 32,
+    'n_attn_layer': 1,
+    'idu_points': 1,
+    'seq_len': 144,
+    'attn_dropout': 0.05,
+    'attn_bias_factor': None,
+    'reg_lin_dims': [16, 1],
+    'epochs': 30,
+    'lr': 5e-3,
+    'batch_size': 8,
+    'verbose': True   # show model summary and training progress
+}
+
+# Initialize and train the GA model.
+model = GARegressor(**params)
+model.fit(X=X_train[tab_x], l=X_train[tab_l], y=y_train)
+print("Model training complete.")
+
+
+# --- Step 3: Test the model ---
+print("\n[Step 3/3] Evaluating the model on the test set...")
+# Predict on the test dataset. Set verbose=False for a cleaner output.
+y_pred, y_pred_std = model.predict(X=X_test[tab_x], l=X_test[tab_l], n_estimate=8, get_std=True, verbose=False)
+
+r2 = r2_score(y_true=y_test[tab_y], y_pred=y_pred)
+mae = mean_absolute_error(y_true=y_test[tab_y], y_pred=y_pred)
+
+print(f"\n--- Demo Results ---")
+print(f"R-squared: {r2:.4f}")
+print(f"Mean Absolute Error: {mae:.4f}")
+print(f"--- Demo Finished ---\n")
+PYTHON
+
+# Set the command to run the demo script
+CMD ["python", "run_demo.py"]
